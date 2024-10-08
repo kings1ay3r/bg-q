@@ -28,12 +28,14 @@ class Queue {
         return this.items.shift();
     }
 }
+const __PROCESSING__ = 'processing';
+const __IDLE__ = 'idle';
 class PatchyInternetQImpl {
     constructor(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, // Consumer's function to check network status
     errorProcessor // Consumer's error processor
     ) {
         this.isListening = false;
-        this.queueStatus = 'idle';
+        this.queueStatus = __IDLE__;
         this.enqueue = (action) => {
             this.queue.enqueue(action);
             this.persistence.saveQueue(this.queue.items);
@@ -56,6 +58,7 @@ class PatchyInternetQImpl {
                     yield this.run();
                 }
                 catch (err) {
+                    // TODO: Implement logger
                     console.log('queue.run:error', err);
                     this.isListening = false;
                     return;
@@ -78,6 +81,7 @@ class PatchyInternetQImpl {
     }
     loadFromPersistence(persistence) {
         return __awaiter(this, void 0, void 0, function* () {
+            // TODO: Ensure queue boot is completed before enque is called.
             this.queue = new Queue(yield persistence.readQueue());
             this.dlQueue = new Queue(yield persistence.readDLQueue());
         });
@@ -101,12 +105,12 @@ class PatchyInternetQImpl {
     }
     run() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (this.queueStatus === 'processing')
+            if (this.queueStatus === __PROCESSING__)
                 return;
             const connectivity = yield this.verifyConnectivity();
             if (!this.queue.head || !connectivity)
                 return;
-            this.queueStatus = 'processing';
+            this.queueStatus = __PROCESSING__;
             try {
                 yield this.process(this.queue.head);
                 this.dequeue();
@@ -115,7 +119,7 @@ class PatchyInternetQImpl {
                 throw err;
             }
             finally {
-                this.queueStatus = 'idle';
+                this.queueStatus = __IDLE__;
             }
         });
     }

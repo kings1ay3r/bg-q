@@ -35,11 +35,14 @@ class Queue<T> {
 	}
 }
 
+const __PROCESSING__ = 'processing';
+const __IDLE__ = 'idle';
+
 export class PatchyInternetQImpl {
 	private queue: Queue<Action>;
 	private dlQueue: Queue<Action>;
 	private isListening = false;
-	private queueStatus: 'idle' | 'processing' = 'idle';
+	private queueStatus : string = __IDLE__;
 	private readonly hooksRegistry;
 	private readonly transformerRegistry;
 	private persistence;
@@ -67,6 +70,7 @@ export class PatchyInternetQImpl {
 	}
 	
 	private async loadFromPersistence(persistence: Persistence) {
+		// TODO: Ensure queue boot is completed before enque is called.
 		this.queue = new Queue(await persistence.readQueue());
 		this.dlQueue = new Queue(await persistence.readDLQueue());
 	}
@@ -104,12 +108,12 @@ export class PatchyInternetQImpl {
 	}
 	
 	private async run() {
-		if (this.queueStatus === 'processing') return;
+		if (this.queueStatus === __PROCESSING__) return;
 		
 		const connectivity = await this.verifyConnectivity();
 		if (!this.queue.head || !connectivity) return;
 		
-		this.queueStatus = 'processing';
+		this.queueStatus = __PROCESSING__;
 		
 		try {
 			await this.process(this.queue.head);
@@ -117,11 +121,11 @@ export class PatchyInternetQImpl {
 		} catch (err) {
 			throw err;
 		} finally {
-			this.queueStatus = 'idle';
+			this.queueStatus = __IDLE__;
 		}
 	}
 	
-	listen = async (callback?: (queueSize: number) => void) => {
+	listen = async () => {
 		if (this.isListening) return;
 		
 		this.isListening = true;
@@ -130,11 +134,10 @@ export class PatchyInternetQImpl {
 			try {
 				await this.run();
 			} catch (err) {
-				console.log('queue.run:error', err);x``
+				// TODO: Implement logger
+				console.log('queue.run:error', err);
 				this.isListening = false;
 				return;
-			} finally {
-				callback?.(this.queue.size);
 			}
 		}
 		
