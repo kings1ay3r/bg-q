@@ -1,6 +1,9 @@
 # Queue in Background (qbg)
 
-A versatile JavaScript/TypeScript library for managing server actions in sequence, especially when actions are interdependent. This queue-based system allows you to queue actions with specific payloads and ensures that they are executed in a controlled manner. Each action can transform its payload just before execution, making it a flexible tool for complex workflows where actions depend on responses from prior actions.
+A versatile JavaScript/TypeScript library for managing server actions in sequence, especially when actions are
+inter-dependent. This queue-based system allows you to queue actions with specific payloads and ensures that they are
+executed in a controlled manner. Each action can transform its payload just before execution, making it a flexible tool
+for complex workflows where actions depend on responses from prior actions.
 
 ## Features
 
@@ -8,6 +11,8 @@ A versatile JavaScript/TypeScript library for managing server actions in sequenc
 - Just-in-time Transformation: Ability to transform payloads just before execution based on specific logic.
 - Error Handling: Customizable error handling that allows failed actions to be retried, added to a dead-letter queue, or handled as per your needs.
 - Persistent Queue: Store and retrieve queued actions using your own persistence layer.
+- Thread Safety: All operations are thread-safe and protected against race conditions, allowing concurrent access from
+  multiple parts of your application.
 - Flexible Connectivity Check: Pass your own function to check network connectivity and manage retries.
 - Minimal Dependencies: This package is free from platform-specific dependencies and can work in any JavaScript environment.
 
@@ -71,9 +76,9 @@ You can install the package via npm or yarn:
    };
 
    // Initialize the queue with registries and persistence layer
-   const queue = init(hooksRegistry, transformerRegistry, persistence);
+   const queue = await init({hooksRegistry, transformerRegistry, persistence});
 
-   // Now you can access the queue instance via getQueue()
+   // Now you can also access the queue instance via getQueue()
    ```
 
 2. Enqueue Actions
@@ -87,7 +92,7 @@ You can install the package via npm or yarn:
    };
 
    // Enqueue the action
-   queue.enqueue(action);
+   await queue.enqueue(action);
    ```
 
 3. Connectivity Check 
@@ -101,12 +106,12 @@ You can install the package via npm or yarn:
       };
 
       // Initialize the queue with a custom connectivity check function
-      const queue = init(
+      const queue = await init({
         hooksRegistry,
         transformerRegistry,
         persistence,
         checkNetworkConnectivity
-      );
+      });
       ```
 
 4. Error Handling
@@ -122,13 +127,13 @@ You can install the package via npm or yarn:
    };
 
    // Initialize with error handling logic
-   const queue = init(
+   const queue = await init({
      hooksRegistry,
      transformerRegistry,
      persistence,
      checkNetworkConnectivity,
      processError
-   );
+   });
    ```
 
 5. Accessing the Queue
@@ -165,7 +170,7 @@ You can install the package via npm or yarn:
 
 Initializes the queue with the necessary registries, persistence layer, and optional functions.
 
-`init(hooksRegistry, transformerRegistry, persistence, checkNetworkConnectivity, processError)`
+`init({hooksRegistry, transformerRegistry, persistence, checkNetworkConnectivity, processError}:InitProps)`
 
 * `hooksRegistry`: A dictionary where the key is the action type, and the value is the function that handles the action.
 * `transformerRegistry`: A dictionary where the key is the action type, and the value is a function to transform the payload just before execution.

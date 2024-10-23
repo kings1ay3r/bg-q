@@ -1,3 +1,5 @@
+import {Mutex} from "async-mutex";
+
 export type Action = {
 	type: string;
 	payload: object;
@@ -42,68 +44,108 @@ export class PatchyInternetQImpl {
 	private queue: Queue<Action>;
 	private dlQueue: Queue<Action>;
 	private isListening = false;
-	private queueStatus : string = __IDLE__;
-	private readonly hooksRegistry;
-	private readonly transformerRegistry;
-	private persistence;
+	private queueStatus = __IDLE__;
+	private readonly hooksRegistry: Record<string, (payload: Object) => Promise<void>>;
+	private readonly transformerRegistry: Record<string, (payload: Object) => any>;
+	private persistence: Persistence;
 	private readonly verifyConnectivity: () => Promise<boolean>;
 	private readonly errorProcessor: (err: Error, action: Action) => boolean;
+	private readyPromise: Promise<void>;
+	private resolveReady: () => void; // Resolver function
+	private mutex = new Mutex();
 	
 	constructor(
 		hooksRegistry: Record<string, (payload: any) => Promise<void>>,
 		transformerRegistry: Record<string, (payload: any) => any>,
 		persistence: Persistence,
-		verifyConnectivity: () => Promise<boolean>, // Consumer's function to check network status
-		errorProcessor: (err: Error, action: Action) => boolean // Consumer's error processor
+		verifyConnectivity: () => Promise<boolean>,
+		errorProcessor: (err: Error, action: Action) => boolean
 	) {
 		this.queue = new Queue([]);
 		this.dlQueue = new Queue([]);
-		this.loadFromPersistence(persistence);
-		
 		this.hooksRegistry = hooksRegistry;
 		this.transformerRegistry = transformerRegistry;
 		this.persistence = persistence;
 		this.verifyConnectivity = verifyConnectivity;
 		this.errorProcessor = errorProcessor;
 		
-		// No internal network listeners here, handled by consumer
+		// Create the promise and capture the resolver
+		this.readyPromise = new Promise<void>((resolve) => {
+			this.resolveReady = resolve as () => void;
+		});
+		
+		// Start loading persistence data and set ready status
+		this.initialize();
 	}
 	
-	private async loadFromPersistence(persistence: Persistence) {
-		// TODO: Ensure queue boot is completed before enque is called.
-		this.queue = new Queue(await persistence.readQueue());
-		this.dlQueue = new Queue(await persistence.readDLQueue());
+	private async initialize() {
+		const releaseLock = await Promise.race([
+			this.mutex.acquire(),
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000)
+			)
+		]);
+		try {
+			await this.loadFromPersistence();
+		} finally {
+			releaseLock(); // Ensure the lock is released after initialization
+		}
+		this.resolveReady(); // Resolve ready promise once data is loaded
 	}
 	
-	public enqueue = (action: Action) => {
-		this.queue.enqueue(action);
-		this.persistence.saveQueue(this.queue.items);
-		this.listen();
-	};
+	private async loadFromPersistence() {
+		this.queue = new Queue(await this.persistence.readQueue());
+		this.dlQueue = new Queue(await this.persistence.readDLQueue());
+	}
 	
-	private dequeue = () => {
-		this.queue.dequeue();
-		this.persistence.saveQueue(this.queue.items);
-	};
+	get ready() {
+		return this.readyPromise;
+	}
 	
-	private enqueueDLQ = (action: Action) => {
-		this.dlQueue.enqueue(action);
-		this.persistence.saveDLQueue(this.dlQueue.items);
-	};
+	public async enqueue(action: Action) {
+		const releaseLock = await this.mutex.acquire();
+		try {
+			this.queue.enqueue(action);
+			await this.persistence.saveQueue(this.queue.items);
+		} finally {
+			releaseLock();
+			this.listen();
+		}
+	}
+	
+	private async dequeue() {
+		const releaseLock = await this.mutex.acquire();
+		try {
+			this.queue.dequeue();
+			await this.persistence.saveQueue(this.queue.items);
+		} finally {
+			releaseLock();
+		}
+	}
+	
+	private async enqueueDLQ(action: Action) {
+		const releaseLock = await this.mutex.acquire();
+		try {
+			this.dlQueue.enqueue(action);
+			await this.persistence.saveDLQueue(this.dlQueue.items);
+		} finally {
+			releaseLock();
+		}
+	}
+	
+	// TODO: Implement public function to clear DLQ
 	
 	private async process(action: Action) {
 		try {
-			const { type, payload } = action;
-			const { payload: transformedPayload, id } =
-			this.transformerRegistry[type]?.(payload) ?? payload;
-			await this.hooksRegistry[type]({ payload: transformedPayload, id });
+			const {type, payload} = action;
+			const transformedPayload = this.transformerRegistry[type]?.(payload) ?? payload;
+			await this.hooksRegistry[type](transformedPayload);
 		} catch (err) {
-			
 			if (!this.errorProcessor(err as Error, action)) {
-				this.enqueueDLQ(action);
-				return;
+				await this.enqueueDLQ(action);
+			} else {
+				throw err;
 			}
-			throw err;
 		}
 	}
 	
@@ -117,15 +159,13 @@ export class PatchyInternetQImpl {
 		
 		try {
 			await this.process(this.queue.head);
-			this.dequeue();
-		} catch (err) {
-			throw err;
+			await this.dequeue();
 		} finally {
 			this.queueStatus = __IDLE__;
 		}
 	}
 	
-	listen = async () => {
+	private listen = async () => {
 		if (this.isListening) return;
 		
 		this.isListening = true;
@@ -145,15 +185,25 @@ export class PatchyInternetQImpl {
 	};
 }
 
+// Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance: PatchyInternetQImpl;
 
-export const init = (
+export interface InitProps {
 	hooksRegistry: Record<string, (payload: any) => Promise<void>>,
 	transformerRegistry: Record<string, (payload: any) => any>,
 	persistence: Persistence,
-	verifyConnectivity: () => Promise<boolean>, // Custom connectivity check
-	errorProcessor: (err: Error, action: Action) => boolean // Custom error processor
-): PatchyInternetQImpl => {
+	verifyConnectivity: () => Promise<boolean>,
+	errorProcessor: (err: Error, action: Action) => boolean
+}
+export const init = async (
+	{
+		hooksRegistry,
+		transformerRegistry,
+		persistence,
+		verifyConnectivity,
+		errorProcessor,
+	}
+): Promise<PatchyInternetQImpl> => {
 	if (queueInstance) return queueInstance;
 	
 	queueInstance = new PatchyInternetQImpl(
@@ -163,6 +213,9 @@ export const init = (
 		verifyConnectivity,
 		errorProcessor
 	);
+	
+	// Wait for the status to be true before returning the instance
+	await queueInstance.ready;
 	
 	return queueInstance;
 };
