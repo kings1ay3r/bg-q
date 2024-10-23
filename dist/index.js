@@ -10,6 +10,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getQueue = exports.init = exports.PatchyInternetQImpl = void 0;
+const async_mutex_1 = require("async-mutex");
 class Queue {
     constructor(items) {
         this.items = items;
@@ -31,24 +32,10 @@ class Queue {
 const __PROCESSING__ = 'processing';
 const __IDLE__ = 'idle';
 class PatchyInternetQImpl {
-    constructor(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, // Consumer's function to check network status
-    errorProcessor // Consumer's error processor
-    ) {
+    constructor(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor) {
         this.isListening = false;
         this.queueStatus = __IDLE__;
-        this.enqueue = (action) => {
-            this.queue.enqueue(action);
-            this.persistence.saveQueue(this.queue.items);
-            this.listen();
-        };
-        this.dequeue = () => {
-            this.queue.dequeue();
-            this.persistence.saveQueue(this.queue.items);
-        };
-        this.enqueueDLQ = (action) => {
-            this.dlQueue.enqueue(action);
-            this.persistence.saveDLQueue(this.dlQueue.items);
-        };
+        this.mutex = new async_mutex_1.Mutex();
         this.listen = () => __awaiter(this, void 0, void 0, function* () {
             if (this.isListening)
                 return;
@@ -68,19 +55,74 @@ class PatchyInternetQImpl {
         });
         this.queue = new Queue([]);
         this.dlQueue = new Queue([]);
-        this.loadFromPersistence(persistence);
         this.hooksRegistry = hooksRegistry;
         this.transformerRegistry = transformerRegistry;
         this.persistence = persistence;
         this.verifyConnectivity = verifyConnectivity;
         this.errorProcessor = errorProcessor;
-        // No internal network listeners here, handled by consumer
+        // Create the promise and capture the resolver
+        this.readyPromise = new Promise((resolve) => {
+            this.resolveReady = resolve;
+        });
+        // Start loading persistence data and set ready status
+        this.initialize();
     }
-    loadFromPersistence(persistence) {
+    initialize() {
         return __awaiter(this, void 0, void 0, function* () {
-            // TODO: Ensure queue boot is completed before enque is called.
-            this.queue = new Queue(yield persistence.readQueue());
-            this.dlQueue = new Queue(yield persistence.readDLQueue());
+            const releaseLock = yield this.mutex.acquire();
+            try {
+                yield this.loadFromPersistence();
+            }
+            finally {
+                releaseLock(); // Ensure the lock is released after initialization
+            }
+            this.resolveReady(); // Resolve ready promise once data is loaded
+        });
+    }
+    loadFromPersistence() {
+        return __awaiter(this, void 0, void 0, function* () {
+            this.queue = new Queue(yield this.persistence.readQueue());
+            this.dlQueue = new Queue(yield this.persistence.readDLQueue());
+        });
+    }
+    get ready() {
+        return this.readyPromise;
+    }
+    enqueue(action) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const releaseLock = yield this.mutex.acquire();
+            try {
+                this.queue.enqueue(action);
+                yield this.persistence.saveQueue(this.queue.items);
+            }
+            finally {
+                releaseLock();
+                this.listen();
+            }
+        });
+    }
+    dequeue() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const releaseLock = yield this.mutex.acquire();
+            try {
+                this.queue.dequeue();
+                yield this.persistence.saveQueue(this.queue.items);
+            }
+            finally {
+                releaseLock();
+            }
+        });
+    }
+    enqueueDLQ(action) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const releaseLock = yield this.mutex.acquire();
+            try {
+                this.dlQueue.enqueue(action);
+                yield this.persistence.saveDLQueue(this.dlQueue.items);
+            }
+            finally {
+                releaseLock();
+            }
         });
     }
     process(action) {
@@ -88,15 +130,16 @@ class PatchyInternetQImpl {
             var _a, _b, _c;
             try {
                 const { type, payload } = action;
-                const { payload: transformedPayload, id } = (_c = (_b = (_a = this.transformerRegistry)[type]) === null || _b === void 0 ? void 0 : _b.call(_a, payload)) !== null && _c !== void 0 ? _c : payload;
-                yield this.hooksRegistry[type]({ payload: transformedPayload, id });
+                const transformedPayload = (_c = (_b = (_a = this.transformerRegistry)[type]) === null || _b === void 0 ? void 0 : _b.call(_a, payload)) !== null && _c !== void 0 ? _c : payload;
+                yield this.hooksRegistry[type](transformedPayload);
             }
             catch (err) {
                 if (!this.errorProcessor(err, action)) {
-                    this.enqueueDLQ(action);
-                    return;
+                    yield this.enqueueDLQ(action);
                 }
-                throw err;
+                else {
+                    throw err;
+                }
             }
         });
     }
@@ -110,7 +153,7 @@ class PatchyInternetQImpl {
             this.queueStatus = __PROCESSING__;
             try {
                 yield this.process(this.queue.head);
-                this.dequeue();
+                yield this.dequeue();
             }
             catch (err) {
                 throw err;
@@ -122,15 +165,16 @@ class PatchyInternetQImpl {
     }
 }
 exports.PatchyInternetQImpl = PatchyInternetQImpl;
+// Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance;
-const init = (hooksRegistry, transformerRegistry, persistence, verifyConnectivity, // Custom connectivity check
-errorProcessor // Custom error processor
-) => {
+const init = (hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor) => __awaiter(void 0, void 0, void 0, function* () {
     if (queueInstance)
         return queueInstance;
     queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor);
+    // Wait for the status to be true before returning the instance
+    yield queueInstance.ready;
     return queueInstance;
-};
+});
 exports.init = init;
 const getQueue = () => queueInstance;
 exports.getQueue = getQueue;
