@@ -48,17 +48,15 @@ export class PatchyInternetQImpl {
 	private readonly hooksRegistry: Record<string, (payload: Object) => Promise<void>>;
 	private readonly transformerRegistry: Record<string, (payload: Object) => any>;
 	private persistence: Persistence;
-	private readonly verifyConnectivity: () => Promise<boolean>;
 	private readonly errorProcessor: (err: Error, action: Action) => boolean;
-	private readyPromise: Promise<void>;
-	private resolveReady: () => void; // Resolver function
+	private readonly readyPromise: Promise<void>;
+	private resolveReady!: () => void; // Resolver function
 	private mutex = new Mutex();
 	
 	constructor(
 		hooksRegistry: Record<string, (payload: any) => Promise<void>>,
 		transformerRegistry: Record<string, (payload: any) => any>,
 		persistence: Persistence,
-		verifyConnectivity: () => Promise<boolean>,
 		errorProcessor: (err: Error, action: Action) => boolean
 	) {
 		this.queue = new Queue([]);
@@ -66,7 +64,6 @@ export class PatchyInternetQImpl {
 		this.hooksRegistry = hooksRegistry;
 		this.transformerRegistry = transformerRegistry;
 		this.persistence = persistence;
-		this.verifyConnectivity = verifyConnectivity;
 		this.errorProcessor = errorProcessor;
 		
 		// Create the promise and capture the resolver
@@ -75,22 +72,21 @@ export class PatchyInternetQImpl {
 		});
 		
 		// Start loading persistence data and set ready status
-		this.initialize();
+		this.initialize().then(() => {
+			this.listen().then(() => {
+			});
+		});
 	}
 	
-	private async initialize() {
-		const releaseLock = await Promise.race([
-			this.mutex.acquire(),
-			new Promise((_, reject) =>
-				setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000)
-			)
-		]);
+	public async enqueue(action: Action) {
+		const releaseLock = await this.mutex.acquire();
 		try {
-			await this.loadFromPersistence();
+			this.queue.enqueue(action);
+			await this.persistence.saveQueue(this.queue.items);
 		} finally {
-			releaseLock(); // Ensure the lock is released after initialization
+			releaseLock();
+			this.listen().then();
 		}
-		this.resolveReady(); // Resolve ready promise once data is loaded
 	}
 	
 	private async loadFromPersistence() {
@@ -102,16 +98,24 @@ export class PatchyInternetQImpl {
 		return this.readyPromise;
 	}
 	
-	public async enqueue(action: Action) {
-		const releaseLock = await this.mutex.acquire();
-		try {
-			this.queue.enqueue(action);
-			await this.persistence.saveQueue(this.queue.items);
-		} finally {
-			releaseLock();
-			this.listen();
+	public listen = async () => {
+		if (this.isListening) return;
+		
+		this.isListening = true;
+		
+		while (this.queue.head && this.isListening) {
+			try {
+				await this.run();
+			} catch (err) {
+				// TODO: Implement logger
+				console.log('queue.run:error', err);
+				this.isListening = false;
+				return;
+			}
 		}
-	}
+		
+		this.isListening = false;
+	};
 	
 	private async dequeue() {
 		const releaseLock = await this.mutex.acquire();
@@ -149,11 +153,24 @@ export class PatchyInternetQImpl {
 		}
 	}
 	
+	private async initialize() {
+		const releaseLock = await Promise.race([
+			this.mutex.acquire(),
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000)
+			)
+		]) as () => void;
+		try {
+			await this.loadFromPersistence();
+		} finally {
+			releaseLock(); // Ensure the lock is released after initialization
+		}
+		this.resolveReady(); // Resolve ready promise once data is loaded
+	}
+	
 	private async run() {
 		if (this.queueStatus === __PROCESSING__) return;
-		
-		const connectivity = await this.verifyConnectivity();
-		if (!this.queue.head || !connectivity) return;
+		if (!this.queue.head) return;
 		
 		this.queueStatus = __PROCESSING__;
 		
@@ -164,45 +181,25 @@ export class PatchyInternetQImpl {
 			this.queueStatus = __IDLE__;
 		}
 	}
-	
-	private listen = async () => {
-		if (this.isListening) return;
-		
-		this.isListening = true;
-		
-		while (this.queue.head && this.isListening) {
-			try {
-				await this.run();
-			} catch (err) {
-				// TODO: Implement logger
-				console.log('queue.run:error', err);
-				this.isListening = false;
-				return;
-			}
-		}
-		
-		this.isListening = false;
-	};
 }
 
 // Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance: PatchyInternetQImpl;
 
 export interface InitProps {
-	hooksRegistry: Record<string, (payload: any) => Promise<void>>,
-	transformerRegistry: Record<string, (payload: any) => any>,
-	persistence: Persistence,
-	verifyConnectivity: () => Promise<boolean>,
-	errorProcessor: (err: Error, action: Action) => boolean
+	hooksRegistry: Record<string, (payload: any) => Promise<void>>;
+	transformerRegistry: Record<string, (payload: any) => any>;
+	persistence: Persistence;
+	errorProcessor: (err: Error, action: Action) => boolean;
 }
+
 export const init = async (
 	{
 		hooksRegistry,
 		transformerRegistry,
 		persistence,
-		verifyConnectivity,
 		errorProcessor,
-	}
+	}: InitProps
 ): Promise<PatchyInternetQImpl> => {
 	if (queueInstance) return queueInstance;
 	
@@ -210,11 +207,9 @@ export const init = async (
 		hooksRegistry,
 		transformerRegistry,
 		persistence,
-		verifyConnectivity,
 		errorProcessor
 	);
 	
-	// Wait for the status to be true before returning the instance
 	await queueInstance.ready;
 	
 	return queueInstance;
