@@ -46,6 +46,31 @@ for complex workflows where actions depend on responses from prior actions.
 You can install the package via npm or yarn:
 `npm install qbg` or `yarn add qbg`
 
+### Quick Start
+
+To get started quickly, follow this example:
+
+```ts
+import {init, Action} from 'qbg';
+
+// Initialize the queue with basic hooks
+const hooksRegistry = {
+	SIMPLE_ACTION: async (payload) => {
+		console.log("Action executed with payload:", payload);
+	},
+};
+
+const queue = await init({hooksRegistry});
+
+// Enqueue an action
+const action: Action = {
+	type: 'SIMPLE_ACTION',
+	payload: {key: 'value'},
+};
+
+await queue.enqueue(action);
+```
+
 ## Usage
 
 1. Initialization
@@ -148,7 +173,7 @@ You can install the package via npm or yarn:
    example, retry failed actions, move them to a dead-letter queue, or handle them as per your use case.
 
    ```ts
-   const processError = (error, action) => {
+   const errorProcessor = (error, action) => {
      if (error instanceof SomeKnownError) {
        // Retry or handle action
        return true; // Return true to retry
@@ -161,8 +186,7 @@ You can install the package via npm or yarn:
      hooksRegistry,
      transformerRegistry,
      persistence,
-     checkNetworkConnectivity,
-     processError
+     errorProcessor
    });
    ```
 
@@ -171,7 +195,7 @@ You can install the package via npm or yarn:
 
    ```ts
    const queue = getQueue();
-   console.log(queue.queueSize); // Get the current size of the queue
+   console.log(queue.size); // Get the current size of the queue
    ```
 
 6. Persistence
@@ -192,84 +216,68 @@ You can install the package via npm or yarn:
    queue (DLQ). You can access the DLQ and take appropriate actions (e.g., logging, manual retries, etc.).
 
    ```ts
-   queue.readDLQueue().then((dlQueue) => {
-     console.log('Failed actions in DLQ:', dlQueue);
-   });
+     console.log('Failed actions in DLQ:', queue.peekDLQ)
    ```
 
 ## API Reference
 
-Initializes the queue with the necessary registries, persistence layer, and optional functions.
+### `init`
 
-`init({hooksRegistry, transformerRegistry, persistence, checkNetworkConnectivity, processError}:InitProps)`
+Initializes the `PatchyInternetQImpl` instance.
 
-* `hooksRegistry`: A dictionary where the key is the action type, and the value is the function that handles the action.
-* `transformerRegistry`: A dictionary where the key is the action type, and the value is a function to transform the
-  payload just before execution.
-* `persistence`: An object implementing the Persistence interface to save and load the queue.
-* `checkNetworkConnectivity` (optional): A function to verify network availability.
-* `processError` (optional): A function to process errors and decide whether to retry or move the action to DLQ.
+- **Parameters:**
+    - `props` (InitProps): An object containing:
+        - `hooksRegistry`: A registry for action hooks.
+        - `transformerRegistry`: A registry for transformers.
+        - `persistence`: An instance of the `Persistence` interface.
+        - `errorProcessor`: A function to process errors.
 
-`enqueue(action: Action)`: Enqueues an action to the queue for sequential execution.
+- **Returns:**
+    - `Promise<PatchyInternetQImpl>`: A promise that resolves to the initialized `PatchyInternetQImpl` instance.
 
-* `action`: The action to be added to the queue. It must have a type and payload.
+### `getQueue`
 
-`getQueue()`: Returns the current instance of the queue for interaction.
+Retrieves the singleton instance of the `PatchyInternetQImpl`.
 
-`queueSize`
-Returns the current number of actions in the queue.
+- **Returns:**
+    - `PatchyInternetQImpl | undefined`: The current instance of the queue or `undefined` if not initialized.
 
-`readDLQueue()`
-Reads and returns the actions in the dead-letter queue (DLQ).
+### `enqueue(action: Action): Promise<void>`
+
+- Adds an action to the queue and saves the queue to persistence.
+
+### `clearDLQueue(): Promise<Action[]>`
+
+- Clears the dead-letter queue and returns its previous items.
+
+### `listen(): Promise<void>`
+
+- Starts listening for and processing actions in the queue.
+
+#### Getters
+
+- **`ready`:**
+    - Returns a promise that resolves when the queue is ready.
+
+- **`size`:**
+    - Returns the size of the main action queue.
+
+- **`peek`:**
+    - Returns the actions to be processed without removing it.
+
+- **`dlQueueSize`:**
+    - Returns the size of the dead-letter queue.
+
+- **`peekDLQ`:**
+    - Returns the actions in the dead-letter queue without removing it.
 
 ## Example Usage
 
-Here is a basic example that demonstrates how to use the library:
+Please find example usage in the [example.md](example.md) file.
 
-```ts
-import {init, Action, getQueue} from 'qbg';
+## Contributing
 
-// Define your hooks and transformer registries
-const hooksRegistry = {
-	FETCH_USER: async (payload) => {
-		/* fetch user logic */
-	},
-	UPDATE_USER: async (payload) => {
-		/* update user logic */
-	},
-};
-
-const transformerRegistry = {
-	FETCH_USER: (payload) => ({...payload, extraData: 'value'}),
-};
-
-// Define persistence layer
-const persistence = {
-	saveQueue: async (queue) => {
-		/* save queue */
-	},
-	saveDLQueue: async (dlQueue) => {
-		/* save DL queue */
-	},
-	readQueue: async () => [],
-	readDLQueue: async () => [],
-};
-
-// Initialize the queue
-const queue = await init({hooksRegistry, transformerRegistry, persistence});
-
-// Enqueue an action
-const action: Action = {
-	type: 'FETCH_USER',
-	payload: {userId: 123},
-};
-
-queue.enqueue(action);
-
-// Access queue instance
-const queueInstance = getQueue();
-console.log(queueInstance.queueSize); // Get the size of the queue
-```
+Contributions are welcome! Please feel free to submit a pull request or open an issue if you encounter any problems.
 
 ## License
 

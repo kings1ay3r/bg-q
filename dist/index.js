@@ -45,8 +45,6 @@ class PatchyInternetQImpl {
                     yield this.run();
                 }
                 catch (err) {
-                    // TODO: Implement logger
-                    console.log('queue.run:error', err);
                     this.isListening = false;
                     return;
                 }
@@ -69,20 +67,9 @@ class PatchyInternetQImpl {
             });
         });
     }
-    initialize() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield Promise.race([
-                this.mutex.acquire(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000))
-            ]);
-            try {
-                yield this.loadFromPersistence();
-            }
-            finally {
-                releaseLock(); // Ensure the lock is released after initialization
-            }
-            this.resolveReady(); // Resolve ready promise once data is loaded
-        });
+
+    get size() {
+        return this.queue.size;
     }
     loadFromPersistence() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -92,19 +79,6 @@ class PatchyInternetQImpl {
     }
     get ready() {
         return this.readyPromise;
-    }
-    enqueue(action) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield this.mutex.acquire();
-            try {
-                this.queue.enqueue(action);
-                yield this.persistence.saveQueue(this.queue.items);
-            }
-            finally {
-                releaseLock();
-                this.listen().then();
-            }
-        });
     }
     dequeue() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -131,7 +105,42 @@ class PatchyInternetQImpl {
         });
     }
 
-    // TODO: Implement public function to clear DLQ
+    get peek() {
+        return [...this.queue.items];
+    }
+    get dlQueueSize() {
+        return this.dlQueue.size;
+    }
+
+    get peekDLQ() {
+        return [...this.dlQueue.items];
+    }
+
+    enqueue(action) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const releaseLock = yield this.mutex.acquire();
+            try {
+                this.queue.enqueue(action);
+                yield this.persistence.saveQueue(this.queue.items);
+            } finally {
+                releaseLock();
+                this.listen().then();
+            }
+        });
+    }
+    clearDLQueue() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const items = [...this.dlQueue.items];
+            try {
+                this.dlQueue = new Queue([]);
+                yield this.persistence.saveDLQueue([]);
+            } catch (err) {
+                this.dlQueue = new Queue(items);
+                throw err;
+            }
+            return items;
+        });
+    }
     process(action) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a, _b, _c;
@@ -148,6 +157,20 @@ class PatchyInternetQImpl {
                     throw err;
                 }
             }
+        });
+    }
+    initialize() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const releaseLock = yield Promise.race([
+                this.mutex.acquire(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000))
+            ]);
+            try {
+                yield this.loadFromPersistence();
+            } finally {
+                releaseLock(); // Ensure the lock is released after initialization
+            }
+            this.resolveReady(); // Resolve ready promise once data is loaded
         });
     }
     run() {
@@ -178,6 +201,10 @@ const init = (_a) => __awaiter(void 0, [_a], void 0, function* ({
                                                                 }) {
     if (queueInstance)
         return queueInstance;
+    if (!persistence)
+        persistence = defaultPersistance;
+    if (!errorProcessor)
+        errorProcessor = defaultErrorProcessor;
     queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry, persistence, errorProcessor);
     yield queueInstance.ready;
     return queueInstance;
@@ -185,3 +212,20 @@ const init = (_a) => __awaiter(void 0, [_a], void 0, function* ({
 exports.init = init;
 const getQueue = () => queueInstance;
 exports.getQueue = getQueue;
+const defaultPersistance = {
+    saveQueue: (queue) => __awaiter(void 0, void 0, void 0, function* () {
+        // Save the current state of the queue
+    }),
+    saveDLQueue: (queue) => __awaiter(void 0, void 0, void 0, function* () {
+        // Save the dead-letter queue
+    }),
+    readQueue: () => __awaiter(void 0, void 0, void 0, function* () {
+        // Read and return the queue from storage
+        return [];
+    }),
+    readDLQueue: () => __awaiter(void 0, void 0, void 0, function* () {
+        // Read and return the dead-letter queue from storage
+        return [];
+    }),
+};
+const defaultErrorProcessor = () => true;

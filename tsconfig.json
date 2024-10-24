@@ -3,6 +3,8 @@
     "module": "CommonJS",
     "target": "ES6",
     "outDir": "./dist",
+    "declaration": true,
+    "declarationDir": "./dist",
     "strict": true,
     "esModuleInterop": true,
     "moduleResolution": "node",
