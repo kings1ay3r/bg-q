@@ -32,7 +32,7 @@ class Queue {
 const __PROCESSING__ = 'processing';
 const __IDLE__ = 'idle';
 class PatchyInternetQImpl {
-    constructor(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor) {
+    constructor(hooksRegistry, transformerRegistry, persistence, errorProcessor) {
         this.isListening = false;
         this.queueStatus = __IDLE__;
         this.mutex = new async_mutex_1.Mutex();
@@ -58,18 +58,23 @@ class PatchyInternetQImpl {
         this.hooksRegistry = hooksRegistry;
         this.transformerRegistry = transformerRegistry;
         this.persistence = persistence;
-        this.verifyConnectivity = verifyConnectivity;
         this.errorProcessor = errorProcessor;
         // Create the promise and capture the resolver
         this.readyPromise = new Promise((resolve) => {
             this.resolveReady = resolve;
         });
         // Start loading persistence data and set ready status
-        this.initialize();
+        this.initialize().then(() => {
+            this.listen().then(() => {
+            });
+        });
     }
     initialize() {
         return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield this.mutex.acquire();
+            const releaseLock = yield Promise.race([
+                this.mutex.acquire(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000))
+            ]);
             try {
                 yield this.loadFromPersistence();
             }
@@ -97,7 +102,7 @@ class PatchyInternetQImpl {
             }
             finally {
                 releaseLock();
-                this.listen();
+                this.listen().then();
             }
         });
     }
@@ -125,6 +130,8 @@ class PatchyInternetQImpl {
             }
         });
     }
+
+    // TODO: Implement public function to clear DLQ
     process(action) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a, _b, _c;
@@ -147,16 +154,12 @@ class PatchyInternetQImpl {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.queueStatus === __PROCESSING__)
                 return;
-            const connectivity = yield this.verifyConnectivity();
-            if (!this.queue.head || !connectivity)
+            if (!this.queue.head)
                 return;
             this.queueStatus = __PROCESSING__;
             try {
                 yield this.process(this.queue.head);
                 yield this.dequeue();
-            }
-            catch (err) {
-                throw err;
             }
             finally {
                 this.queueStatus = __IDLE__;
@@ -167,11 +170,15 @@ class PatchyInternetQImpl {
 exports.PatchyInternetQImpl = PatchyInternetQImpl;
 // Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance;
-const init = (hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor) => __awaiter(void 0, void 0, void 0, function* () {
+const init = (_a) => __awaiter(void 0, [_a], void 0, function* ({
+                                                                    hooksRegistry,
+                                                                    transformerRegistry,
+                                                                    persistence,
+                                                                    errorProcessor,
+                                                                }) {
     if (queueInstance)
         return queueInstance;
-    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry, persistence, verifyConnectivity, errorProcessor);
-    // Wait for the status to be true before returning the instance
+    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry, persistence, errorProcessor);
     yield queueInstance.ready;
     return queueInstance;
 });

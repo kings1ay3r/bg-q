@@ -5,7 +5,10 @@
     "outDir": "./dist",
     "strict": true,
     "esModuleInterop": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "lib": [
+      "es6"
+    ]
   },
   "include": ["src"]
 }
