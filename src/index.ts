@@ -107,8 +107,6 @@ export class PatchyInternetQImpl {
 			try {
 				await this.run();
 			} catch (err) {
-				// TODO: Implement logger
-				console.log('queue.run:error', err);
 				this.isListening = false;
 				return;
 			}
@@ -137,7 +135,34 @@ export class PatchyInternetQImpl {
 		}
 	}
 	
-	// TODO: Implement public function to clear DLQ
+	
+	get size(): number {
+		return this.queue.size
+	}
+	
+	get dlQueueSize(): number {
+		return this.dlQueue.size
+	}
+	
+	get peek(): Action[] {
+		return [...this.queue.items]
+	}
+	
+	get peekDLQ(): Action[] {
+		return [...this.dlQueue.items]
+	}
+	
+	public async clearDLQueue() {
+		const items = [...this.dlQueue.items]
+		try {
+			this.dlQueue = new Queue([]);
+			await this.persistence.saveDLQueue([]);
+		} catch (err) {
+			this.dlQueue = new Queue(items);
+			throw err;
+		}
+		return items;
+	}
 	
 	private async process(action: Action) {
 		try {
@@ -202,6 +227,8 @@ export const init = async (
 	}: InitProps
 ): Promise<PatchyInternetQImpl> => {
 	if (queueInstance) return queueInstance;
+	if (!persistence) persistence = defaultPersistance;
+	if (!errorProcessor) errorProcessor = defaultErrorProcessor;
 	
 	queueInstance = new PatchyInternetQImpl(
 		hooksRegistry,
@@ -216,3 +243,23 @@ export const init = async (
 };
 
 export const getQueue = () => queueInstance;
+
+
+const defaultPersistance: Persistence = {
+	saveQueue: async (queue) => {
+		// Save the current state of the queue
+	},
+	saveDLQueue: async (queue) => {
+		// Save the dead-letter queue
+	},
+	readQueue: async () => {
+		// Read and return the queue from storage
+		return [];
+	},
+	readDLQueue: async () => {
+		// Read and return the dead-letter queue from storage
+		return [];
+	},
+};
+
+const defaultErrorProcessor = () => true;

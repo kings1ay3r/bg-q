@@ -1,8 +1,12 @@
 {
   "name": "qbg",
-  "version": "0.9.4",
+  "version": "1.0.0",
   "description": "A versatile JavaScript/TypeScript library for managing server actions in sequence, especially when actions are interdependent. A flexible tool for complex workflows where actions depend on responses from prior actions.",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc"
   },
