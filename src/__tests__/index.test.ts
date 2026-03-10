@@ -1,11 +1,4 @@
-import {
-	init,
-	getQueue,
-	resetQueue,
-	PatchyInternetQImpl,
-	Action,
-	Persistence,
-} from '../index';
+import {Action, getQueue, init, PatchyInternetQImpl, Persistence, resetQueue,} from '../index';
 
 // Helper: create a mock persistence layer that stores in-memory
 function createMockPersistence(): Persistence & {
@@ -15,16 +8,16 @@ function createMockPersistence(): Persistence & {
 	const store = {
 		queueStore: [] as Action[],
 		dlQueueStore: [] as Action[],
-		saveQueue: async (actions: Action[]) => {
+		saveQueue: jest.fn(async (actions: Action[]) => {
 			store.queueStore = [...actions];
-		},
-		saveDLQueue: async (actions: Action[]) => {
+		}),
+		saveDLQueue: jest.fn(async (actions: Action[]) => {
 			store.dlQueueStore = [...actions];
-		},
+		}),
 		readQueue: async () => [...store.queueStore],
 		readDLQueue: async () => [...store.dlQueueStore],
 	};
-	return store;
+	return store as any;
 }
 
 describe('PatchyInternetQImpl', () => {
@@ -216,11 +209,13 @@ describe('PatchyInternetQImpl', () => {
 				errorProcessor: () => false,
 				persistence,
 			});
-
+			
+			const initialSaveCalls = (persistence.saveQueue as jest.Mock).mock.calls.length;
 			await queue.enqueue({type: 'A', payload: {}});
-			// The enqueue saves, then listen fires and moves to DLQ (no hook)
-			// But we can verify the persistence was called
-			expect(persistence.dlQueueStore.length).toBeGreaterThanOrEqual(0);
+			
+			// Verification: enqueue calls saveQueue
+			expect((persistence.saveQueue as jest.Mock).mock.calls.length).toBeGreaterThan(initialSaveCalls);
+			expect(persistence.queueStore).toContainEqual({type: 'A', payload: {}});
 		});
 
 		it('should load queue from persistence on init', async () => {
@@ -298,13 +293,13 @@ describe('PatchyInternetQImpl', () => {
 			await new Promise((r) => setTimeout(r, 150));
 			expect(processed).toEqual(['item1']);
 			expect(queue.size).toBe(0);
-
-			persistence.saveQueue = async (actions: Action[]) => {
+			
+			persistence.saveQueue = jest.fn(async (actions: Action[]) => {
 				if (failSave && actions.length < persistence.queueStore.length) {
 					throw new Error('Persistence failure during dequeue');
 				}
 				return originalSaveQueue(actions);
-			};
+			}) as any;
 
 			// Enqueue second item. listen() will fire.
 			failSave = true;
