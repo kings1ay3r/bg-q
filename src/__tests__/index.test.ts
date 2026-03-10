@@ -26,16 +26,23 @@ describe('PatchyInternetQImpl', () => {
 	});
 
 	describe('init / getQueue', () => {
-		it('should initialize and return a queue instance', async () => {
-			const queue = await init({hooksRegistry: {}});
+		it('should initialize and return a queue instance', () => {
+			const queue = init({hooksRegistry: {}});
 
 			expect(queue).toBeInstanceOf(PatchyInternetQImpl);
 			expect(getQueue()).toBe(queue);
 		});
-
-		it('should return the same instance on repeated init calls', async () => {
-			const q1 = await init({hooksRegistry: {}});
-			const q2 = await init({hooksRegistry: {}});
+		
+		it('should expose status and listening state', () => {
+			const queue = init({hooksRegistry: {}});
+			expect(queue.status).toBeDefined();
+			expect(queue.isProcessing).toBe(false);
+			expect(queue.listening).toBeDefined();
+		});
+		
+		it('should return the same instance on repeated init calls', () => {
+			const q1 = init({hooksRegistry: {}});
+			const q2 = init({hooksRegistry: {}});
 
 			expect(q1).toBe(q2);
 		});
@@ -53,8 +60,8 @@ describe('PatchyInternetQImpl', () => {
 					processed.push(payload.name);
 				},
 			};
-
-			const queue = await init({hooksRegistry});
+			
+			const queue = init({hooksRegistry});
 
 			await queue.enqueue({type: 'TEST', payload: {name: 'first'}});
 			// Wait for listen to process
@@ -80,8 +87,8 @@ describe('PatchyInternetQImpl', () => {
 					transformed: true,
 				}),
 			};
-
-			const queue = await init({hooksRegistry, transformerRegistry});
+			
+			const queue = init({hooksRegistry, transformerRegistry});
 			await queue.enqueue({
 				type: 'TRANSFORM_TEST',
 				payload: {original: true},
@@ -152,8 +159,8 @@ describe('PatchyInternetQImpl', () => {
 				(_err: Error, _action: Action) => false
 			);
 			const persistence = createMockPersistence();
-
-			const queue = await init({
+			
+			const queue = init({
 				hooksRegistry: {},
 				persistence,
 				errorProcessor,
@@ -204,15 +211,15 @@ describe('PatchyInternetQImpl', () => {
 	describe('persistence', () => {
 		it('should save queue state on enqueue', async () => {
 			const persistence = createMockPersistence();
-			const queue = await init({
+			const queue = init({
 				hooksRegistry: {},
 				errorProcessor: () => false,
 				persistence,
 			});
-			
+
 			const initialSaveCalls = (persistence.saveQueue as jest.Mock).mock.calls.length;
 			await queue.enqueue({type: 'A', payload: {}});
-			
+
 			// Verification: enqueue calls saveQueue
 			expect((persistence.saveQueue as jest.Mock).mock.calls.length).toBeGreaterThan(initialSaveCalls);
 			expect(persistence.queueStore).toContainEqual({type: 'A', payload: {}});
@@ -232,8 +239,8 @@ describe('PatchyInternetQImpl', () => {
 					processed.push(payload.name);
 				},
 			};
-
-			const queue = await init({hooksRegistry, persistence});
+			
+			const queue = init({hooksRegistry, persistence});
 			await new Promise((r) => setTimeout(r, 100));
 
 			expect(processed).toEqual(['preloaded1']);
@@ -263,7 +270,7 @@ describe('PatchyInternetQImpl', () => {
 	});
 
 	describe('advanced features and fixes', () => {
-		it('should rollback memory state if persistence fails during dequeue', async () => {
+		it('should NOT rollback memory state if persistence fails after successful hook (Optimistic Dequeue)', async () => {
 			const persistence = createMockPersistence();
 			const originalSaveQueue = persistence.saveQueue;
 			let failSave = false;
@@ -307,10 +314,10 @@ describe('PatchyInternetQImpl', () => {
 
 			// Wait for potential processing and failure
 			await new Promise((r) => setTimeout(r, 150));
-
-			// dequeue should have failed and rolled back memory
-			expect(queue.size).toBe(1);
-			expect(queue.peek[0].payload).toEqual({name: 'item2'});
+			
+			// Optimistic Dequeue: item is removed from memory even if persistence fails
+			expect(queue.size).toBe(0);
+			expect(queue.peek.length).toBe(0);
 		});
 
 		it('should maintain internal offset and clean up periodically', async () => {

@@ -61,8 +61,8 @@ class Queue<T> {
 	}
 }
 
-const __PROCESSING__ = 'processing';
-const __IDLE__ = 'idle';
+export const __PROCESSING__ = 'processing';
+export const __IDLE__ = 'idle';
 
 const INIT_TIMEOUT_MS = 5000;
 
@@ -159,15 +159,9 @@ export class PatchyInternetQImpl {
 
 	private async dequeue(): Promise<void> {
 		const releaseLock = await this.mutex.acquire();
-		const originalItems = this.queue.toArray();
 		try {
 			this.queue.dequeue();
 			await this.persistence.saveQueue(this.queue.items);
-		} catch (err) {
-			// Rollback memory state if persistence fails
-			// We must restore the items AND the fact that the head was not actually removed
-			this.queue.setItems(originalItems);
-			throw err;
 		} finally {
 			releaseLock();
 		}
@@ -197,6 +191,18 @@ export class PatchyInternetQImpl {
 
 	get peekDLQ(): Action[] {
 		return this.dlQueue.toArray();
+	}
+	
+	get status(): string {
+		return this.queueStatus;
+	}
+	
+	get isProcessing(): boolean {
+		return this.queueStatus === __PROCESSING__;
+	}
+	
+	get listening(): boolean {
+		return this.isListening;
 	}
 
 	public async clearDLQueue(): Promise<Action[]> {
@@ -285,14 +291,14 @@ export interface InitProps {
 	errorProcessor?: (err: Error, action: Action) => boolean;
 }
 
-export const init = async (
+export const init = (
 	{
 		hooksRegistry,
 		transformerRegistry,
 		persistence,
 		errorProcessor,
 	}: InitProps
-): Promise<PatchyInternetQImpl> => {
+): PatchyInternetQImpl => {
 	if (queueInstance) return queueInstance;
 
 	queueInstance = new PatchyInternetQImpl(
@@ -301,8 +307,6 @@ export const init = async (
 		persistence ?? defaultPersistence,
 		errorProcessor ?? defaultErrorProcessor
 	);
-
-	await queueInstance.ready;
 
 	return queueInstance;
 };
