@@ -52,7 +52,7 @@ class Queue<T> {
 	}
 
 	public toArray(): T[] {
-		return this._items.slice(this._offset);
+		return this.items;
 	}
 
 	public setItems(items: T[]): void {
@@ -117,10 +117,14 @@ export class PatchyInternetQImpl {
 		}
 		this.listen().catch(() => {});
 	}
-
-	private async loadFromPersistence(): Promise<void> {
-		this.queue = new Queue(await this.persistence.readQueue());
-		this.dlQueue = new Queue(await this.persistence.readDLQueue());
+	
+	private async loadFromPersistence(signal?: AbortSignal): Promise<void> {
+		const queueData = await this.persistence.readQueue();
+		if (signal?.aborted) return;
+		this.queue = new Queue(queueData);
+		const dlQueueData = await this.persistence.readDLQueue();
+		if (signal?.aborted) return;
+		this.dlQueue = new Queue(dlQueueData);
 	}
 
 	get ready(): Promise<void> {
@@ -139,9 +143,7 @@ export class PatchyInternetQImpl {
 
 		try {
 			while (this.isListening) {
-				const releaseLock = await this.mutex.acquire();
 				const action = this.queue.head;
-				releaseLock();
 
 				if (!action) break;
 
@@ -231,12 +233,13 @@ export class PatchyInternetQImpl {
 	 *                   and processing continues with the next action.
 	 */
 	private async process(action: Action): Promise<void> {
+		const {type, payload} = action;
+		const hook = this.hooksRegistry[type];
+		if (!hook) {
+			await this.enqueueDLQ(action);
+			return;
+		}
 		try {
-			const {type, payload} = action;
-			const hook = this.hooksRegistry[type];
-			if (!hook) {
-				throw new Error(`No hook registered for action type: "${type}"`);
-			}
 			const transformedPayload = this.transformerRegistry[type]?.(payload) ?? payload;
 			await hook(transformedPayload);
 		} catch (err) {
@@ -250,10 +253,11 @@ export class PatchyInternetQImpl {
 
 	private async initialize(): Promise<void> {
 		const releaseLock = await this.mutex.acquire();
+		const controller = new AbortController();
 		try {
 			let timeoutId: NodeJS.Timeout | undefined;
 			await Promise.race([
-				this.loadFromPersistence(),
+				this.loadFromPersistence(controller.signal),
 				new Promise<never>((_, reject) => {
 					timeoutId = setTimeout(
 						() => reject(new Error('Initialization timed out: persistence load took too long')),
@@ -262,6 +266,9 @@ export class PatchyInternetQImpl {
 				})
 			]);
 			if (timeoutId) clearTimeout(timeoutId);
+		} catch (err) {
+			controller.abort();
+			throw err;
 		} finally {
 			releaseLock();
 		}
@@ -320,7 +327,14 @@ export const resetQueue = (): void => {
 	queueInstance = undefined;
 };
 
-const defaultPersistence: Persistence = {
+/**
+ * Default persistence implementation.
+ * WARNING: This is an in-memory/no-op default intended for testing only.
+ * Callers must provide a production Persistence implementation for durable queues.
+ * Methods saveQueue and saveDLQueue are no-ops.
+ * Methods readQueue and readDLQueue return empty arrays.
+ */
+export const defaultPersistence: Persistence = {
 	saveQueue: async (_actions: Action[]): Promise<void> => {},
 	saveDLQueue: async (_actions: Action[]): Promise<void> => {},
 	readQueue: async (): Promise<Action[]> => [],

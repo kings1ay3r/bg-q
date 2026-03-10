@@ -1,4 +1,4 @@
-import {Action, getQueue, init, PatchyInternetQImpl, Persistence, resetQueue,} from '../index';
+import {Action, defaultPersistence, getQueue, init, PatchyInternetQImpl, Persistence, resetQueue,} from '../index';
 
 // Helper: create a mock persistence layer that stores in-memory
 function createMockPersistence(): Persistence & {
@@ -153,8 +153,8 @@ describe('PatchyInternetQImpl', () => {
 			expect(callCount).toBe(2);
 			expect(queue.size).toBe(1); // still there, retryable
 		});
-
-		it('should throw an error for unregistered action types', async () => {
+		
+		it('should move actions with missing hooks to DLQ without calling errorProcessor', async () => {
 			const errorProcessor = jest.fn(
 				(_err: Error, _action: Action) => false
 			);
@@ -168,13 +168,8 @@ describe('PatchyInternetQImpl', () => {
 
 			await queue.enqueue({type: 'UNKNOWN', payload: {}});
 			await new Promise((r) => setTimeout(r, 100));
-
-			expect(errorProcessor).toHaveBeenCalledWith(
-				expect.objectContaining({
-					message: 'No hook registered for action type: "UNKNOWN"',
-				}),
-				expect.objectContaining({type: 'UNKNOWN'})
-			);
+			
+			expect(errorProcessor).not.toHaveBeenCalled();
 			expect(queue.dlQueueSize).toBe(1);
 		});
 	});
@@ -322,7 +317,11 @@ describe('PatchyInternetQImpl', () => {
 
 		it('should maintain internal offset and clean up periodically', async () => {
 			// This test indirectly checks the offset logic via peek and size
-			const queue = await init({hooksRegistry: {}});
+			const queue = new PatchyInternetQImpl({}, {}, defaultPersistence, () => true);
+			await queue.ready;
+			
+			// Stop auto-processing to test raw size
+			(queue as any).isListening = true;
 
 			// Enqueue 10 items
 			for (let i = 0; i < 10; i++) {
