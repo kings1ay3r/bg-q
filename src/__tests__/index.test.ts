@@ -1,0 +1,373 @@
+import {Action, defaultPersistence, getQueue, init, PatchyInternetQImpl, Persistence, resetQueue,} from '../index';
+
+// Helper: create a mock persistence layer that stores in-memory
+function createMockPersistence(): Persistence & {
+	queueStore: Action[];
+	dlQueueStore: Action[];
+} {
+	const store = {
+		queueStore: [] as Action[],
+		dlQueueStore: [] as Action[],
+		saveQueue: jest.fn(async (actions: Action[]) => {
+			store.queueStore = [...actions];
+		}),
+		saveDLQueue: jest.fn(async (actions: Action[]) => {
+			store.dlQueueStore = [...actions];
+		}),
+		readQueue: async () => [...store.queueStore],
+		readDLQueue: async () => [...store.dlQueueStore],
+	};
+	return store as any;
+}
+
+describe('PatchyInternetQImpl', () => {
+	afterEach(() => {
+		resetQueue();
+	});
+
+	describe('init / getQueue', () => {
+		it('should initialize and return a queue instance', () => {
+			const queue = init({hooksRegistry: {}});
+
+			expect(queue).toBeInstanceOf(PatchyInternetQImpl);
+			expect(getQueue()).toBe(queue);
+		});
+		
+		it('should expose status and listening state', () => {
+			const queue = init({hooksRegistry: {}});
+			expect(queue.status).toBeDefined();
+			expect(queue.isProcessing).toBe(false);
+			expect(queue.listening).toBeDefined();
+		});
+		
+		it('should return the same instance on repeated init calls', () => {
+			const q1 = init({hooksRegistry: {}});
+			const q2 = init({hooksRegistry: {}});
+
+			expect(q1).toBe(q2);
+		});
+
+		it('should return undefined from getQueue before init', () => {
+			expect(getQueue()).toBeUndefined();
+		});
+	});
+
+	describe('enqueue and processing', () => {
+		it('should process actions in order via hooks', async () => {
+			const processed: string[] = [];
+			const hooksRegistry = {
+				TEST: async (payload: any) => {
+					processed.push(payload.name);
+				},
+			};
+			
+			const queue = init({hooksRegistry});
+
+			await queue.enqueue({type: 'TEST', payload: {name: 'first'}});
+			// Wait for listen to process
+			await new Promise((r) => setTimeout(r, 100));
+
+			await queue.enqueue({type: 'TEST', payload: {name: 'second'}});
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(processed).toEqual(['first', 'second']);
+			expect(queue.size).toBe(0);
+		});
+
+		it('should apply transformers before processing', async () => {
+			let receivedPayload: any;
+			const hooksRegistry = {
+				TRANSFORM_TEST: async (payload: any) => {
+					receivedPayload = payload;
+				},
+			};
+			const transformerRegistry = {
+				TRANSFORM_TEST: (payload: any) => ({
+					...payload,
+					transformed: true,
+				}),
+			};
+			
+			const queue = init({hooksRegistry, transformerRegistry});
+			await queue.enqueue({
+				type: 'TRANSFORM_TEST',
+				payload: {original: true},
+			});
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(receivedPayload).toEqual({original: true, transformed: true});
+		});
+	});
+
+	describe('error handling and DLQ', () => {
+		it('should move actions to DLQ when errorProcessor returns false', async () => {
+			const hooksRegistry = {
+				FAIL: async (_payload: any) => {
+					throw new Error('deliberate failure');
+				},
+			};
+			const errorProcessor = (_err: Error, _action: Action) => false;
+			const persistence = createMockPersistence();
+			
+			const queue = init({
+				hooksRegistry,
+				persistence,
+				errorProcessor,
+			});
+
+			await queue.enqueue({type: 'FAIL', payload: {x: 1}});
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(queue.size).toBe(0);
+			expect(queue.dlQueueSize).toBe(1);
+			expect(queue.peekDLQ[0].type).toBe('FAIL');
+		});
+
+		it('should stop processing when errorProcessor returns true (retry semantics)', async () => {
+			let callCount = 0;
+			const hooksRegistry = {
+				RETRY_TEST: async (_payload: any) => {
+					callCount++;
+					throw new Error('transient failure');
+				},
+			};
+			const errorProcessor = (_err: Error, _action: Action) => true;
+			const persistence = createMockPersistence();
+			
+			const queue = init({
+				hooksRegistry,
+				persistence,
+				errorProcessor,
+			});
+
+			await queue.enqueue({type: 'RETRY_TEST', payload: {}});
+			await new Promise((r) => setTimeout(r, 100));
+
+			// Action stays at the head for retry — first attempt + listen auto-start
+			expect(callCount).toBe(1);
+			expect(queue.size).toBe(1);
+			expect(queue.dlQueueSize).toBe(0);
+
+			// Call listen again to retry
+			await queue.listen();
+			expect(callCount).toBe(2);
+			expect(queue.size).toBe(1); // still there, retryable
+		});
+		
+		it('should move actions with missing hooks to DLQ without calling errorProcessor', async () => {
+			const errorProcessor = jest.fn(
+				(_err: Error, _action: Action) => false
+			);
+			const persistence = createMockPersistence();
+			
+			const queue = init({
+				hooksRegistry: {},
+				persistence,
+				errorProcessor,
+			});
+
+			await queue.enqueue({type: 'UNKNOWN', payload: {}});
+			await new Promise((r) => setTimeout(r, 100));
+			
+			expect(errorProcessor).not.toHaveBeenCalled();
+			expect(queue.dlQueueSize).toBe(1);
+		});
+	});
+
+	describe('clearDLQueue', () => {
+		it('should clear the DLQ and return its items', async () => {
+			const hooksRegistry = {
+				FAIL: async () => {
+					throw new Error('fail');
+				},
+			};
+			const errorProcessor = () => false;
+			const persistence = createMockPersistence();
+			
+			const queue = init({
+				hooksRegistry,
+				persistence,
+				errorProcessor,
+			});
+
+			await queue.enqueue({type: 'FAIL', payload: {a: 1}});
+			await queue.enqueue({type: 'FAIL', payload: {b: 2}});
+			await new Promise((r) => setTimeout(r, 200));
+
+			expect(queue.dlQueueSize).toBe(2);
+
+			const cleared = await queue.clearDLQueue();
+			expect(cleared).toHaveLength(2);
+			expect(queue.dlQueueSize).toBe(0);
+			expect(persistence.dlQueueStore).toEqual([]);
+		});
+	});
+
+	describe('persistence', () => {
+		it('should save queue state on enqueue', async () => {
+			const persistence = createMockPersistence();
+			const queue = init({
+				hooksRegistry: {},
+				errorProcessor: () => false,
+				persistence,
+			});
+
+			const initialSaveCalls = (persistence.saveQueue as jest.Mock).mock.calls.length;
+			await queue.enqueue({type: 'A', payload: {}});
+
+			// Verification: enqueue calls saveQueue
+			expect((persistence.saveQueue as jest.Mock).mock.calls.length).toBeGreaterThan(initialSaveCalls);
+			expect(persistence.queueStore).toContainEqual({type: 'A', payload: {}});
+		});
+
+		it('should load queue from persistence on init', async () => {
+			const persistence = createMockPersistence();
+			const processed: string[] = [];
+
+			// Pre-populate persistence
+			persistence.queueStore = [
+				{type: 'PRELOADED', payload: {name: 'preloaded1'}},
+			];
+
+			const hooksRegistry = {
+				PRELOADED: async (payload: any) => {
+					processed.push(payload.name);
+				},
+			};
+			
+			const queue = init({hooksRegistry, persistence});
+			await new Promise((r) => setTimeout(r, 100));
+
+			expect(processed).toEqual(['preloaded1']);
+			expect(queue.size).toBe(0);
+		});
+	});
+
+	describe('peek', () => {
+		it('should return a copy of the queue items', async () => {
+			const hooksRegistry = {
+				SLOW: async () => {
+					await new Promise((r) => setTimeout(r, 500));
+				},
+			};
+			const queue = init({hooksRegistry});
+
+			await queue.enqueue({type: 'SLOW', payload: {seq: 1}});
+			await queue.enqueue({type: 'SLOW', payload: {seq: 2}});
+
+			const peeked = queue.peek;
+			expect(peeked.length).toBeGreaterThanOrEqual(1);
+
+			// Mutating the returned array should not affect the queue
+			peeked.pop();
+			expect(queue.peek.length).toBeGreaterThanOrEqual(1);
+		});
+	});
+
+	describe('advanced features and fixes', () => {
+		it('should NOT rollback memory state if persistence fails after successful hook (Optimistic Dequeue)', async () => {
+			const persistence = createMockPersistence();
+			const originalSaveQueue = persistence.saveQueue;
+			let failSave = false;
+
+			const processed: string[] = [];
+			const hooksRegistry = {
+				FIX: async (payload: any) => {
+					processed.push(payload.name);
+				},
+			};
+
+			// Create a FRESH instance to avoid singleton pollution
+			const queue = new PatchyInternetQImpl(
+				hooksRegistry,
+				{},
+				persistence,
+				() => true // always retry
+			);
+			await queue.ready;
+
+			// Wait for initial listen to finish (queue empty)
+			await new Promise((r) => setTimeout(r, 150));
+
+			await queue.enqueue({type: 'FIX', payload: {name: 'item1'}});
+
+			// Wait for item1 to be processed
+			await new Promise((r) => setTimeout(r, 150));
+			expect(processed).toEqual(['item1']);
+			expect(queue.size).toBe(0);
+			
+			persistence.saveQueue = jest.fn(async (actions: Action[]) => {
+				if (failSave && actions.length < persistence.queueStore.length) {
+					throw new Error('Persistence failure during dequeue');
+				}
+				return originalSaveQueue(actions);
+			}) as any;
+
+			// Enqueue second item. listen() will fire.
+			failSave = true;
+			await queue.enqueue({type: 'FIX', payload: {name: 'item2'}});
+
+			// Wait for potential processing and failure
+			await new Promise((r) => setTimeout(r, 150));
+			
+			// Optimistic Dequeue: item is removed from memory even if persistence fails
+			expect(queue.size).toBe(0);
+			expect(queue.peek.length).toBe(0);
+		});
+
+		it('should maintain internal offset and clean up periodically', async () => {
+			// Test internal cleanup logic by constructing PatchyInternetQImpl directly
+			const queue = new PatchyInternetQImpl({}, {}, defaultPersistence, () => true);
+			await queue.ready;
+			
+			// Stop auto-processing to test raw size by setting isListening to true
+			(queue as any).isListening = true;
+
+			// Enqueue 10 items
+			for (let i = 0; i < 10; i++) {
+				await queue.enqueue({type: 'NOOP', payload: {i}});
+			}
+
+			expect(queue.size).toBe(10);
+			// Accessing private _items and _offset for verification
+			expect((queue as any).queue._items.length).toBe(10);
+			expect((queue as any).queue._offset).toBe(0);
+			
+			// Manually dequeue items to trigger cleanup
+			// Cleanup happens when _offset * 2 > _items.length
+			for (let i = 0; i < 6; i++) {
+				(queue as any).queue.dequeue();
+			}
+			
+			// After 6 dequeues, _offset is 6, length is 10. 6*2 > 10 is true.
+			// Cleanup should have occurred, resetting _offset to 0 and slicing _items.
+			expect((queue as any).queue._offset).toBe(0);
+			expect((queue as any).queue._items.length).toBe(4);
+			expect(queue.size).toBe(4);
+		});
+		
+		it('should correctly handle queue operations using public API', async () => {
+			const hooksRegistry = {
+				NOOP: async () => {}
+			};
+			const queue = init({hooksRegistry});
+
+			for (let i = 0; i < 10; i++) {
+				await queue.enqueue({type: 'NOOP', payload: {i}});
+			}
+
+			// Wait for all to be processed
+			await new Promise((r) => setTimeout(r, 500));
+			expect(queue.size).toBe(0);
+
+			// Enqueue one more
+			await queue.enqueue({type: 'NOOP', payload: {i: 10}});
+			// Small delay for processing
+			await new Promise((r) => setTimeout(r, 100));
+			
+			expect(queue.size).toBe(0);
+			// We can't easily check for CORRECTNESS of processing without more hooks,
+			// but this verifies the public flow works after a "fill and empty" cycle.
+		});
+	});
+});
