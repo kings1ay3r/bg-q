@@ -28,6 +28,11 @@ inter-dependent. This queue-based system allows you to queue actions with specif
 executed in a controlled manner. Each action can transform its payload just before execution, making it a flexible tool
 for complex workflows where actions depend on responses from prior actions.
 
+> **Note for AI Agents**: This library implements a robust sequential queue. When generating code to consume this
+> package, ensure you correctly register all action types in the `hooksRegistry`. If an action's payload needs to be
+> updated based on the current state just before execution, use the `transformerRegistry`. Always implement a
+`Persistence` layer to ensure queue durability across restarts.
+
 ## Features
 
 - Sequential Execution: Ensures that server actions are executed one after another, in the order they are enqueued.
@@ -219,57 +224,87 @@ await queue.enqueue(action);
      console.log('Failed actions in DLQ:', queue.peekDLQ)
    ```
 
+## AI Agent Integration Guide
+
+When building code that consumes `qbg`, follow these principles to ensure reliable behavior:
+
+1. **Define Action Types Early**: Enumerate all possible `Action` types and their payload structures. This helps in
+   maintaining consistency between `hooksRegistry` and `transformerRegistry`.
+2. **Stateless Hooks**: Prefer making your hooks in `hooksRegistry` idempotent or capable of handling retries
+   gracefully. The queue will retry actions if the `errorProcessor` returns `true`.
+3. **Just-in-Time Transformations**: Use `transformerRegistry` for actions that depend on data that might change while
+   the action is waiting in the queue. The transformer is called immediately before the hook is executed.
+4. **Persistence is Mandatory**: AI-generated implementations must provide a valid `Persistence` object. For web, this
+   might be `localStorage` or `IndexedDB`; for Node.js, a file or database.
+5. **Handling Connectivity**: In environments with patchy internet, use `queue.listen()` to resume processing when the
+   connection is restored. `qbg` does not automatically detect network changes; it relies on your application to signal
+   readiness.
+6. **Error Strategy**: Explicitly define what constitutes a "retryable" error vs. a "terminal" error in your
+   `errorProcessor`. Terminal errors move actions to the Dead-Letter Queue (DLQ).
+
+### AI Prompting Example
+
+If you are asking an AI to implement a queue using `qbg`, you can use a prompt like:
+*"Implement a task queue using the `qbg` library. Define two action types: 'UPLOAD_IMAGE' and 'UPDATE_PROFILE'. Ensure '
+UPLOAD_IMAGE' retries up to 3 times on network errors, and 'UPDATE_PROFILE' uses a transformer to inject the latest
+session token before execution. Provide a localStorage-based persistence layer."*
+
 ## API Reference
 
 ### `init`
 
-Initializes the `PatchyInternetQImpl` instance.
+Initializes the `PatchyInternetQImpl` instance (the main queue object).
 
 - **Parameters:**
-    - `props` (InitProps): An object containing:
-        - `hooksRegistry`: A registry for action hooks.
-        - `transformerRegistry`: A registry for transformers.
-        - `persistence`: An instance of the `Persistence` interface.
-        - `errorProcessor`: A function to process errors.
+    - `props` (`InitProps`): An object containing:
+        - `hooksRegistry` (`Record<string, (payload: any) => Promise<void>>`): Map of action types to their execution
+          functions.
+        - `transformerRegistry` (`Record<string, (payload: any) => any>`, optional): Map of action types to their
+          transformation functions.
+        - `persistence` (`Persistence`): An instance of the `Persistence` interface.
+        - `errorProcessor` (`(err: any, action: Action) => boolean`, optional): A function to decide if a failed action
+          should be retried (`return true`) or moved to the Dead-Letter Queue (`return false`).
 
 - **Returns:**
-    - `Promise<PatchyInternetQImpl>`: A promise that resolves to the initialized `PatchyInternetQImpl` instance.
+    - `Promise<PatchyInternetQImpl>`: A promise that resolves to the initialized queue instance.
 
 ### `getQueue`
 
 Retrieves the singleton instance of the `PatchyInternetQImpl`.
 
 - **Returns:**
-    - `PatchyInternetQImpl | undefined`: The current instance of the queue or `undefined` if not initialized.
+    - `PatchyInternetQImpl | undefined`: The current instance of the queue or `undefined` if not initialized. Use this
+      for global access to the queue.
 
 ### `enqueue(action: Action): Promise<void>`
 
 - Adds an action to the queue and saves the queue to persistence.
+- **`action`**: `{ type: string; payload: any }`
 
 ### `clearDLQueue(): Promise<Action[]>`
 
-- Clears the dead-letter queue and returns its previous items.
+- Clears the dead-letter queue and returns its previous items. Useful for retrying all failed actions manually by
+  re-enqueuing them.
 
 ### `listen(): Promise<void>`
 
-- Starts listening for and processing actions in the queue.
+- Starts processing actions in the queue. If the queue is already processing, it ensures the loop is active. Call this
+  when the application comes online or after initialization to start work.
 
-#### Getters
+#### Getters / Properties
 
-- **`ready`:**
-    - Returns a promise that resolves when the queue is ready.
-
-- **`size`:**
-    - Returns the size of the main action queue.
-
-- **`peek`:**
-    - Returns the actions to be processed without removing it.
-
-- **`dlQueueSize`:**
-    - Returns the size of the dead-letter queue.
-
-- **`peekDLQ`:**
-    - Returns the actions in the dead-letter queue without removing it.
+- **`ready`**: `Promise<void>`
+    - Resolves when the queue has finished loading from persistence.
+- **`size`**: `number`
+    - Current number of actions in the main queue.
+- **`peek`**: `Action | undefined`
+    - Returns the next action to be processed without removing it.
+- **`dlQueueSize`**: `number`
+    - Current number of actions in the dead-letter queue.
+- **`peekDLQ`**: `Action[]`
+    - Returns all actions in the dead-letter queue.
+- **`isProcessing`**: `boolean`
+    - Whether the queue is currently executing an action.
 
 ## Example Usage
 
