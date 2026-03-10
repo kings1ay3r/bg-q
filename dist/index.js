@@ -1,38 +1,52 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resetQueue = exports.getQueue = exports.init = exports.PatchyInternetQImpl = void 0;
+exports.defaultPersistence = exports.resetQueue = exports.getQueue = exports.init = exports.PatchyInternetQImpl = exports.__IDLE__ = exports.__PROCESSING__ = void 0;
 const async_mutex_1 = require("async-mutex");
 class Queue {
     constructor(items) {
+        this._offset = 0;
         this._items = items;
     }
     get head() {
-        return this._items[0];
+        return this._items[this._offset];
     }
     get size() {
-        return this._items.length;
+        return this._items.length - this._offset;
     }
     get items() {
-        return this._items;
+        return this._items.slice(this._offset);
     }
     enqueue(item) {
         this._items.push(item);
         return item;
     }
     dequeue() {
-        return this._items.shift();
+        if (this.size === 0)
+            return undefined;
+        const item = this._items[this._offset];
+        this._offset++;
+        // Optional: periodical cleanup of the array to reclaim memory
+        if (this._offset * 2 > this._items.length) {
+            this._items = this._items.slice(this._offset);
+            this._offset = 0;
+        }
+        return item;
     }
     toArray() {
-        return [...this._items];
+        return this.items;
+    }
+    setItems(items) {
+        this._items = items;
+        this._offset = 0;
     }
 }
-const __PROCESSING__ = 'processing';
-const __IDLE__ = 'idle';
+exports.__PROCESSING__ = 'processing';
+exports.__IDLE__ = 'idle';
 const INIT_TIMEOUT_MS = 5000;
 class PatchyInternetQImpl {
     constructor(hooksRegistry, transformerRegistry, persistence, errorProcessor) {
         this.isListening = false;
-        this.queueStatus = __IDLE__;
+        this.queueStatus = exports.__IDLE__;
         this.mutex = new async_mutex_1.Mutex();
         /**
          * Starts processing actions in the queue sequentially.
@@ -44,16 +58,23 @@ class PatchyInternetQImpl {
             if (this.isListening)
                 return;
             this.isListening = true;
-            while (this.queue.head && this.isListening) {
-                try {
-                    await this.run();
-                }
-                catch (err) {
-                    this.isListening = false;
-                    return;
+            try {
+                while (this.isListening) {
+                    const action = this.queue.head;
+                    if (!action)
+                        break;
+                    try {
+                        await this.run(action);
+                    }
+                    catch (err) {
+                        // Error processor signaled transient error (run threw)
+                        break;
+                    }
                 }
             }
-            this.isListening = false;
+            finally {
+                this.isListening = false;
+            }
         };
         this.queue = new Queue([]);
         this.dlQueue = new Queue([]);
@@ -84,9 +105,15 @@ class PatchyInternetQImpl {
         }
         this.listen().catch(() => { });
     }
-    async loadFromPersistence() {
-        this.queue = new Queue(await this.persistence.readQueue());
-        this.dlQueue = new Queue(await this.persistence.readDLQueue());
+    async loadFromPersistence(signal) {
+        const queueData = await this.persistence.readQueue();
+        if (signal === null || signal === void 0 ? void 0 : signal.aborted)
+            return;
+        this.queue = new Queue(queueData);
+        const dlQueueData = await this.persistence.readDLQueue();
+        if (signal === null || signal === void 0 ? void 0 : signal.aborted)
+            return;
+        this.dlQueue = new Queue(dlQueueData);
     }
     get ready() {
         return this.readyPromise;
@@ -123,6 +150,15 @@ class PatchyInternetQImpl {
     get peekDLQ() {
         return this.dlQueue.toArray();
     }
+    get status() {
+        return this.queueStatus;
+    }
+    get isProcessing() {
+        return this.queueStatus === exports.__PROCESSING__;
+    }
+    get listening() {
+        return this.isListening;
+    }
     async clearDLQueue() {
         const releaseLock = await this.mutex.acquire();
         const items = this.dlQueue.toArray();
@@ -151,12 +187,13 @@ class PatchyInternetQImpl {
      */
     async process(action) {
         var _a, _b, _c;
+        const { type, payload } = action;
+        const hook = this.hooksRegistry[type];
+        if (!hook) {
+            await this.enqueueDLQ(action);
+            return;
+        }
         try {
-            const { type, payload } = action;
-            const hook = this.hooksRegistry[type];
-            if (!hook) {
-                throw new Error(`No hook registered for action type: "${type}"`);
-            }
             const transformedPayload = (_c = (_b = (_a = this.transformerRegistry)[type]) === null || _b === void 0 ? void 0 : _b.call(_a, payload)) !== null && _c !== void 0 ? _c : payload;
             await hook(transformedPayload);
         }
@@ -171,10 +208,11 @@ class PatchyInternetQImpl {
     }
     async initialize() {
         const releaseLock = await this.mutex.acquire();
+        const controller = new AbortController();
         try {
             let timeoutId;
             await Promise.race([
-                this.loadFromPersistence(),
+                this.loadFromPersistence(controller.signal),
                 new Promise((_, reject) => {
                     timeoutId = setTimeout(() => reject(new Error('Initialization timed out: persistence load took too long')), INIT_TIMEOUT_MS);
                 })
@@ -182,34 +220,35 @@ class PatchyInternetQImpl {
             if (timeoutId)
                 clearTimeout(timeoutId);
         }
+        catch (err) {
+            controller.abort();
+            throw err;
+        }
         finally {
             releaseLock();
         }
         this.resolveReady();
     }
-    async run() {
-        if (this.queueStatus === __PROCESSING__)
+    async run(action) {
+        if (this.queueStatus === exports.__PROCESSING__)
             return;
-        if (!this.queue.head)
-            return;
-        this.queueStatus = __PROCESSING__;
+        this.queueStatus = exports.__PROCESSING__;
         try {
-            await this.process(this.queue.head);
+            await this.process(action);
             await this.dequeue();
         }
         finally {
-            this.queueStatus = __IDLE__;
+            this.queueStatus = exports.__IDLE__;
         }
     }
 }
 exports.PatchyInternetQImpl = PatchyInternetQImpl;
 // Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance;
-const init = async ({ hooksRegistry, transformerRegistry, persistence, errorProcessor, }) => {
+const init = ({ hooksRegistry, transformerRegistry, persistence, errorProcessor, }) => {
     if (queueInstance)
         return queueInstance;
-    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry !== null && transformerRegistry !== void 0 ? transformerRegistry : {}, persistence !== null && persistence !== void 0 ? persistence : defaultPersistence, errorProcessor !== null && errorProcessor !== void 0 ? errorProcessor : defaultErrorProcessor);
-    await queueInstance.ready;
+    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry !== null && transformerRegistry !== void 0 ? transformerRegistry : {}, persistence !== null && persistence !== void 0 ? persistence : exports.defaultPersistence, errorProcessor !== null && errorProcessor !== void 0 ? errorProcessor : defaultErrorProcessor);
     return queueInstance;
 };
 exports.init = init;
@@ -222,7 +261,14 @@ const resetQueue = () => {
     queueInstance = undefined;
 };
 exports.resetQueue = resetQueue;
-const defaultPersistence = {
+/**
+ * Default persistence implementation.
+ * WARNING: This is an in-memory/no-op default intended for testing only.
+ * Callers must provide a production Persistence implementation for durable queues.
+ * Methods saveQueue and saveDLQueue are no-ops.
+ * Methods readQueue and readDLQueue return empty arrays.
+ */
+exports.defaultPersistence = {
     saveQueue: async (_actions) => { },
     saveDLQueue: async (_actions) => { },
     readQueue: async () => [],
