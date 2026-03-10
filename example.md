@@ -1,4 +1,4 @@
-# Example node implimentation
+# Example node implementation
 
 ```ts
 import { init, getQueue } from 'qbg';
@@ -72,7 +72,7 @@ async function main() {
 		errorProcessor,
 	});
 	sleep(3000);
-	
+
 	const actions = [
 		{ type: 'ACTION_TYPE_1', payload: { key: 'Emily', seq: 1, delay: 6 } },
 		{ type: 'ACTION_TYPE_2', payload: { key: 'Sophia', seq: 2, delay: 2 } },
@@ -105,14 +105,16 @@ async function main() {
 		{ type: 'ACTION_TYPE_1', payload: { key: 'Nora', seq: 29, delay: 3 } },
 		{ type: 'ACTION_TYPE_2', payload: { key: 'Camila', seq: 30, delay: 4 } },
 	];
-	
-	actions.map((item) => queue.enqueue(item));
-	
+
+	for (const item of actions) {
+		await queue.enqueue(item);
+	}
+
 	await sleep(3000);
 	console.log('calling listen', queue.size);
 	queue.listen();
 	console.log('calling listen', queue.size);
-	
+
 	while (queue.size) {
 		await sleep(1000);
 		console.log('calling listen', queue.size);

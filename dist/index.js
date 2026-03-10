@@ -1,48 +1,52 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getQueue = exports.init = exports.PatchyInternetQImpl = void 0;
+exports.resetQueue = exports.getQueue = exports.init = exports.PatchyInternetQImpl = void 0;
 const async_mutex_1 = require("async-mutex");
 class Queue {
     constructor(items) {
-        this.items = items;
+        this._items = items;
     }
     get head() {
-        return this.items[0];
+        return this._items[0];
     }
     get size() {
-        return this.items.length;
+        return this._items.length;
+    }
+    get items() {
+        return this._items;
     }
     enqueue(item) {
-        this.items.push(item);
+        this._items.push(item);
         return item;
     }
     dequeue() {
-        return this.items.shift();
+        return this._items.shift();
+    }
+    toArray() {
+        return [...this._items];
     }
 }
 const __PROCESSING__ = 'processing';
 const __IDLE__ = 'idle';
+const INIT_TIMEOUT_MS = 5000;
 class PatchyInternetQImpl {
     constructor(hooksRegistry, transformerRegistry, persistence, errorProcessor) {
         this.isListening = false;
         this.queueStatus = __IDLE__;
         this.mutex = new async_mutex_1.Mutex();
-        this.listen = () => __awaiter(this, void 0, void 0, function* () {
+        /**
+         * Starts processing actions in the queue sequentially.
+         * If already listening, this is a no-op.
+         * Processing stops when the queue is empty or an error is re-thrown
+         * (i.e., errorProcessor returns true for a transient/retryable error).
+         */
+        this.listen = async () => {
             if (this.isListening)
                 return;
             this.isListening = true;
             while (this.queue.head && this.isListening) {
                 try {
-                    yield this.run();
+                    await this.run();
                 }
                 catch (err) {
                     this.isListening = false;
@@ -50,182 +54,183 @@ class PatchyInternetQImpl {
                 }
             }
             this.isListening = false;
-        });
+        };
         this.queue = new Queue([]);
         this.dlQueue = new Queue([]);
         this.hooksRegistry = hooksRegistry;
         this.transformerRegistry = transformerRegistry;
         this.persistence = persistence;
         this.errorProcessor = errorProcessor;
-        // Create the promise and capture the resolver
-        this.readyPromise = new Promise((resolve) => {
+        // Create the promise and capture both resolver and rejector
+        this.readyPromise = new Promise((resolve, reject) => {
             this.resolveReady = resolve;
+            this.rejectReady = reject;
         });
         // Start loading persistence data and set ready status
-        this.initialize().then(() => {
-            this.listen().then(() => {
-            });
+        this.initialize()
+            .then(() => this.listen())
+            .catch((err) => {
+            this.rejectReady(err instanceof Error ? err : new Error(String(err)));
         });
     }
-
-    get size() {
-        return this.queue.size;
+    async enqueue(action) {
+        const releaseLock = await this.mutex.acquire();
+        try {
+            this.queue.enqueue(action);
+            await this.persistence.saveQueue(this.queue.items);
+        }
+        finally {
+            releaseLock();
+        }
+        this.listen().catch(() => { });
     }
-    loadFromPersistence() {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.queue = new Queue(yield this.persistence.readQueue());
-            this.dlQueue = new Queue(yield this.persistence.readDLQueue());
-        });
+    async loadFromPersistence() {
+        this.queue = new Queue(await this.persistence.readQueue());
+        this.dlQueue = new Queue(await this.persistence.readDLQueue());
     }
     get ready() {
         return this.readyPromise;
     }
-    dequeue() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield this.mutex.acquire();
-            try {
-                this.queue.dequeue();
-                yield this.persistence.saveQueue(this.queue.items);
-            }
-            finally {
-                releaseLock();
-            }
-        });
+    async dequeue() {
+        const releaseLock = await this.mutex.acquire();
+        try {
+            this.queue.dequeue();
+            await this.persistence.saveQueue(this.queue.items);
+        }
+        finally {
+            releaseLock();
+        }
     }
-    enqueueDLQ(action) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield this.mutex.acquire();
-            try {
-                this.dlQueue.enqueue(action);
-                yield this.persistence.saveDLQueue(this.dlQueue.items);
-            }
-            finally {
-                releaseLock();
-            }
-        });
+    async enqueueDLQ(action) {
+        const releaseLock = await this.mutex.acquire();
+        try {
+            this.dlQueue.enqueue(action);
+            await this.persistence.saveDLQueue(this.dlQueue.items);
+        }
+        finally {
+            releaseLock();
+        }
     }
-
-    get peek() {
-        return [...this.queue.items];
+    get size() {
+        return this.queue.size;
     }
     get dlQueueSize() {
         return this.dlQueue.size;
     }
-
+    get peek() {
+        return this.queue.toArray();
+    }
     get peekDLQ() {
-        return [...this.dlQueue.items];
+        return this.dlQueue.toArray();
     }
-
-    enqueue(action) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield this.mutex.acquire();
-            try {
-                this.queue.enqueue(action);
-                yield this.persistence.saveQueue(this.queue.items);
-            } finally {
-                releaseLock();
-                this.listen().then();
+    async clearDLQueue() {
+        const releaseLock = await this.mutex.acquire();
+        const items = this.dlQueue.toArray();
+        try {
+            this.dlQueue = new Queue([]);
+            await this.persistence.saveDLQueue([]);
+            return items;
+        }
+        catch (err) {
+            this.dlQueue = new Queue(items);
+            throw err;
+        }
+        finally {
+            releaseLock();
+        }
+    }
+    /**
+     * Processes a single action by looking up its hook and applying any transformer.
+     *
+     * Error handling semantics (via errorProcessor):
+     * - Return `true`:  The error is transient/retryable. The error is re-thrown,
+     *                   which stops the listener. The action stays at the head of the
+     *                   queue and will be retried on the next listen() call.
+     * - Return `false`: The error is permanent. The action is moved to the DLQ
+     *                   and processing continues with the next action.
+     */
+    async process(action) {
+        var _a, _b, _c;
+        try {
+            const { type, payload } = action;
+            const hook = this.hooksRegistry[type];
+            if (!hook) {
+                throw new Error(`No hook registered for action type: "${type}"`);
             }
-        });
-    }
-    clearDLQueue() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const items = [...this.dlQueue.items];
-            try {
-                this.dlQueue = new Queue([]);
-                yield this.persistence.saveDLQueue([]);
-            } catch (err) {
-                this.dlQueue = new Queue(items);
+            const transformedPayload = (_c = (_b = (_a = this.transformerRegistry)[type]) === null || _b === void 0 ? void 0 : _b.call(_a, payload)) !== null && _c !== void 0 ? _c : payload;
+            await hook(transformedPayload);
+        }
+        catch (err) {
+            if (!this.errorProcessor(err, action)) {
+                await this.enqueueDLQ(action);
+            }
+            else {
                 throw err;
             }
-            return items;
-        });
+        }
     }
-    process(action) {
-        return __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c;
-            try {
-                const { type, payload } = action;
-                const transformedPayload = (_c = (_b = (_a = this.transformerRegistry)[type]) === null || _b === void 0 ? void 0 : _b.call(_a, payload)) !== null && _c !== void 0 ? _c : payload;
-                yield this.hooksRegistry[type](transformedPayload);
-            }
-            catch (err) {
-                if (!this.errorProcessor(err, action)) {
-                    yield this.enqueueDLQ(action);
-                }
-                else {
-                    throw err;
-                }
-            }
-        });
-    }
-    initialize() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const releaseLock = yield Promise.race([
-                this.mutex.acquire(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('mutex acquisition timeout')), 5000))
+    async initialize() {
+        const releaseLock = await this.mutex.acquire();
+        try {
+            let timeoutId;
+            await Promise.race([
+                this.loadFromPersistence(),
+                new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => reject(new Error('Initialization timed out: persistence load took too long')), INIT_TIMEOUT_MS);
+                })
             ]);
-            try {
-                yield this.loadFromPersistence();
-            } finally {
-                releaseLock(); // Ensure the lock is released after initialization
-            }
-            this.resolveReady(); // Resolve ready promise once data is loaded
-        });
+            if (timeoutId)
+                clearTimeout(timeoutId);
+        }
+        finally {
+            releaseLock();
+        }
+        this.resolveReady();
     }
-    run() {
-        return __awaiter(this, void 0, void 0, function* () {
-            if (this.queueStatus === __PROCESSING__)
-                return;
-            if (!this.queue.head)
-                return;
-            this.queueStatus = __PROCESSING__;
-            try {
-                yield this.process(this.queue.head);
-                yield this.dequeue();
-            }
-            finally {
-                this.queueStatus = __IDLE__;
-            }
-        });
+    async run() {
+        if (this.queueStatus === __PROCESSING__)
+            return;
+        if (!this.queue.head)
+            return;
+        this.queueStatus = __PROCESSING__;
+        try {
+            await this.process(this.queue.head);
+            await this.dequeue();
+        }
+        finally {
+            this.queueStatus = __IDLE__;
+        }
     }
 }
 exports.PatchyInternetQImpl = PatchyInternetQImpl;
 // Queue instance is kept in the module scope to be shared across different parts of the app
 let queueInstance;
-const init = (_a) => __awaiter(void 0, [_a], void 0, function* ({
-                                                                    hooksRegistry,
-                                                                    transformerRegistry,
-                                                                    persistence,
-                                                                    errorProcessor,
-                                                                }) {
+const init = async ({ hooksRegistry, transformerRegistry, persistence, errorProcessor, }) => {
     if (queueInstance)
         return queueInstance;
-    if (!persistence)
-        persistence = defaultPersistance;
-    if (!errorProcessor)
-        errorProcessor = defaultErrorProcessor;
-    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry, persistence, errorProcessor);
-    yield queueInstance.ready;
+    queueInstance = new PatchyInternetQImpl(hooksRegistry, transformerRegistry !== null && transformerRegistry !== void 0 ? transformerRegistry : {}, persistence !== null && persistence !== void 0 ? persistence : defaultPersistence, errorProcessor !== null && errorProcessor !== void 0 ? errorProcessor : defaultErrorProcessor);
+    await queueInstance.ready;
     return queueInstance;
-});
+};
 exports.init = init;
 const getQueue = () => queueInstance;
 exports.getQueue = getQueue;
-const defaultPersistance = {
-    saveQueue: (queue) => __awaiter(void 0, void 0, void 0, function* () {
-        // Save the current state of the queue
-    }),
-    saveDLQueue: (queue) => __awaiter(void 0, void 0, void 0, function* () {
-        // Save the dead-letter queue
-    }),
-    readQueue: () => __awaiter(void 0, void 0, void 0, function* () {
-        // Read and return the queue from storage
-        return [];
-    }),
-    readDLQueue: () => __awaiter(void 0, void 0, void 0, function* () {
-        // Read and return the dead-letter queue from storage
-        return [];
-    }),
+/**
+ * Resets the singleton queue instance. Intended for testing.
+ */
+const resetQueue = () => {
+    queueInstance = undefined;
 };
-const defaultErrorProcessor = () => true;
+exports.resetQueue = resetQueue;
+const defaultPersistence = {
+    saveQueue: async (_actions) => { },
+    saveDLQueue: async (_actions) => { },
+    readQueue: async () => [],
+    readDLQueue: async () => [],
+};
+/**
+ * Default error processor: returns true to signal a transient/retryable error,
+ * which pauses queue processing until the next listen() call.
+ * Return false from your custom errorProcessor to move the action to the dead-letter queue.
+ */
+const defaultErrorProcessor = (_err, _action) => true;

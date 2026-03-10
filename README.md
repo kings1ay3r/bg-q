@@ -88,7 +88,7 @@ await queue.enqueue(action);
      getQueue,
      Action,
      Persistence,
-   } from 'qbg ';
+   } from 'qbg';
 
    // Define how each action type should be handled
    const hooksRegistry = {
@@ -128,9 +128,9 @@ await queue.enqueue(action);
 
    // Initialize the queue with registries and persistence layer
    const queue = await init({
-    hooksRegistry, 
-    transformerRegistry, 
-    persistence, 
+    hooksRegistry,
+    transformerRegistry,
+    persistence,
    });
 
    // Now you can also access the queue instance via getQueue()
@@ -165,7 +165,7 @@ await queue.enqueue(action);
         queue.listen();
       }
    });
-  
+
    ```
 
 4. Error Handling
